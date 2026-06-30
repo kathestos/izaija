@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AssetType {
+  STOCK
+  CRYPTO
+}
+
+enum TransactionType {
+  BUY
+  SELL
+}
+
+model Profile {
+  id           String    @id @default(cuid())
+  clerkUserId  String    @unique
+  initialCash  Decimal?
+  cashBalance  Decimal   @default(0)
+  isOnboarded Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  positions    Position[]
+  transactions Transaction[]
+  watchlist    WatchlistItem[]
+}
+
+model Asset {
+  id        String    @id @default(cuid())
+  symbol    String    @unique
+  name      String
+  type      AssetType
+  exchange  String?
+  currency  String    @default("USD")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  positions    Position[]
+  transactions Transaction[]
+  watchlist    WatchlistItem[]
+}
+
+model Position {
+  id          String   @id @default(cuid())
+  profileId   String
+  assetId     String
+  quantity    Decimal
+  averageCost Decimal
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  asset   Asset   @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, assetId])
+}
+
+model Transaction {
+  id        String          @id @default(cuid())
+  profileId String
+  assetId   String
+  type      TransactionType
+  quantity  Decimal
+  price     Decimal
+  total     Decimal
+  createdAt DateTime        @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  asset   Asset   @relation(fields: [assetId], references: [id], onDelete: Cascade)
+}
+
+model WatchlistItem {
+  id        String   @id @default(cuid())
+  profileId String
+  assetId   String
+  createdAt DateTime @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  asset   Asset   @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, assetId])
+}
