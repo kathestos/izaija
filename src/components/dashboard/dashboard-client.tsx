@@ -56,6 +56,29 @@ const defaultSelection: AssetSelection = {
   currency: "USD",
 };
 
+type MarketListAsset = {
+  id?: string;
+  symbol: string;
+  name: string;
+  type: "STOCK" | "CRYPTO";
+  exchange?: string | null;
+  currency?: string | null;
+};
+
+function marketListKey(asset: MarketListAsset, index: number) {
+  return [
+    asset.id,
+    asset.symbol,
+    asset.type,
+    asset.exchange ?? "",
+    asset.currency ?? "USD",
+    asset.name,
+    index,
+  ]
+    .filter(Boolean)
+    .join("|");
+}
+
 export function DashboardClient({ userName }: { userName: string }) {
   const utils = trpc.useUtils();
   const [query, setQuery] = useState("");
@@ -395,12 +418,16 @@ export function DashboardClient({ userName }: { userName: string }) {
                 ) : null}
                 {(query.trim().length >= 2 ? search.data ?? [] : summary.data?.watchlist ?? [])
                   .slice(0, 8)
-                  .map((asset) => (
+                  .map((asset, index) => (
                     <button
-                      key={asset.symbol}
+                      key={marketListKey(asset, index)}
                       className={cn(
                         "w-full rounded-md border p-3 text-left transition-colors hover:bg-muted",
-                        selectedAsset.symbol === asset.symbol && "border-primary",
+                        selectedAsset.symbol === asset.symbol &&
+                          selectedAsset.type === asset.type &&
+                          selectedAsset.exchange ===
+                            ("exchange" in asset ? asset.exchange : undefined) &&
+                          "border-primary",
                       )}
                       onClick={() =>
                         selectAsset({
@@ -422,6 +449,11 @@ export function DashboardClient({ userName }: { userName: string }) {
                       <div className="mt-1 truncate text-sm text-muted-foreground">
                         {asset.name}
                       </div>
+                      {"exchange" in asset && asset.exchange ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {asset.exchange} - {asset.currency}
+                        </div>
+                      ) : null}
                     </button>
                   ))}
                 {query.trim().length >= 2 && !search.isFetching && !search.data?.length ? (

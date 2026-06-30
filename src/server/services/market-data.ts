@@ -74,6 +74,27 @@ function fallbackAsset(symbol: string): MarketSearchResult {
   );
 }
 
+function searchResultKey(asset: MarketSearchResult) {
+  return [
+    asset.symbol,
+    asset.type,
+    asset.exchange ?? "",
+    asset.currency,
+    asset.name,
+  ].join("|");
+}
+
+function uniqueSearchResults(results: MarketSearchResult[]) {
+  const seen = new Set<string>();
+
+  return results.filter((asset) => {
+    const key = searchResultKey(asset);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function hashSymbol(symbol: string) {
   return [...symbol].reduce((total, char) => total + char.charCodeAt(0), 0);
 }
@@ -149,10 +170,7 @@ export async function searchMarket(query: string): Promise<MarketSearchResult[]>
 
   const key = apiKey();
   if (!key) {
-    return demoAssets.filter((asset) => {
-      const haystack = `${asset.symbol} ${asset.name}`.toLowerCase();
-      return haystack.includes(normalizedQuery.toLowerCase());
-    });
+    return searchMarketWithoutApi(normalizedQuery);
   }
 
   const url = new URL(`${apiBase}/symbol_search`);
@@ -169,26 +187,28 @@ export async function searchMarket(query: string): Promise<MarketSearchResult[]>
     }>;
   }>(url);
 
-  const results =
+  const results = uniqueSearchResults(
     data?.data
       ?.filter((item) => item.symbol)
-      .slice(0, 12)
       .map((item) => ({
         symbol: normalizeSymbol(item.symbol ?? ""),
         name: item.instrument_name || item.symbol || "Unknown asset",
         type: classifyAsset(item.symbol ?? "", item.instrument_type),
         exchange: item.exchange,
         currency: item.currency || "USD",
-      })) ?? [];
+      })) ?? [],
+  ).slice(0, 12);
 
   return results.length ? results : searchMarketWithoutApi(normalizedQuery);
 }
 
 function searchMarketWithoutApi(query: string) {
-  return demoAssets.filter((asset) => {
-    const haystack = `${asset.symbol} ${asset.name}`.toLowerCase();
-    return haystack.includes(query.toLowerCase());
-  });
+  return uniqueSearchResults(
+    demoAssets.filter((asset) => {
+      const haystack = `${asset.symbol} ${asset.name}`.toLowerCase();
+      return haystack.includes(query.toLowerCase());
+    }),
+  );
 }
 
 export async function getQuote(symbol: string): Promise<MarketQuote> {
