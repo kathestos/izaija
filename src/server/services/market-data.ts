@@ -1,4 +1,8 @@
+import { AssetType, Prisma } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
+
 export type AssetKind = "STOCK" | "CRYPTO";
+export type MarketDataProvider = "alpaca" | "binance";
 
 export type MarketSearchResult = {
   symbol: string;
@@ -14,7 +18,8 @@ export type MarketQuote = MarketSearchResult & {
   changePercent: number;
   previousClose?: number;
   timestamp: string;
-  provider: "twelve-data" | "mock";
+  provider: MarketDataProvider;
+  cached: boolean;
 };
 
 export type ChartRange = "1H" | "1D" | "1W" | "1M" | "1Y";
@@ -24,54 +29,175 @@ export type ChartPoint = {
   price: number;
 };
 
-const demoAssets: MarketSearchResult[] = [
-  { symbol: "AAPL", name: "Apple Inc.", type: "STOCK", exchange: "NASDAQ", currency: "USD" },
-  { symbol: "MSFT", name: "Microsoft Corporation", type: "STOCK", exchange: "NASDAQ", currency: "USD" },
-  { symbol: "NVDA", name: "NVIDIA Corporation", type: "STOCK", exchange: "NASDAQ", currency: "USD" },
-  { symbol: "TSLA", name: "Tesla, Inc.", type: "STOCK", exchange: "NASDAQ", currency: "USD" },
-  { symbol: "AMZN", name: "Amazon.com, Inc.", type: "STOCK", exchange: "NASDAQ", currency: "USD" },
-  { symbol: "BTC/USD", name: "Bitcoin / US Dollar", type: "CRYPTO", exchange: "Crypto", currency: "USD" },
-  { symbol: "ETH/USD", name: "Ethereum / US Dollar", type: "CRYPTO", exchange: "Crypto", currency: "USD" },
-  { symbol: "SOL/USD", name: "Solana / US Dollar", type: "CRYPTO", exchange: "Crypto", currency: "USD" },
-];
-
-const rangeConfig: Record<ChartRange, { interval: string; outputsize: number; mockStepMs: number }> = {
-  "1H": { interval: "1min", outputsize: 60, mockStepMs: 60_000 },
-  "1D": { interval: "5min", outputsize: 288, mockStepMs: 5 * 60_000 },
-  "1W": { interval: "1h", outputsize: 168, mockStepMs: 60 * 60_000 },
-  "1M": { interval: "1day", outputsize: 31, mockStepMs: 24 * 60 * 60_000 },
-  "1Y": { interval: "1week", outputsize: 52, mockStepMs: 7 * 24 * 60 * 60_000 },
+type AlpacaAsset = {
+  symbol?: string;
+  name?: string;
+  exchange?: string;
+  status?: string;
+  tradable?: boolean;
+  asset_class?: string;
 };
 
-const apiBase = "https://api.twelvedata.com";
+type AlpacaBar = {
+  t?: string;
+  c?: number;
+};
 
-function apiKey() {
-  return process.env.TWELVE_DATA_API_KEY?.trim();
+type BinanceTicker = {
+  symbol: string;
+  price: string;
+};
+
+const QUOTE_CACHE_MS = 60_000;
+const SERIES_CACHE_MS = 5 * 60_000;
+const SEARCH_CACHE_MS = 15 * 60_000;
+
+const ALPACA_TRADING_BASE = "https://paper-api.alpaca.markets";
+const ALPACA_DATA_BASE = "https://data.alpaca.markets";
+const BINANCE_BASE = "https://api.binance.com";
+
+const rangeConfig: Record<
+  ChartRange,
+  { alpacaTimeframe: string; binanceInterval: string; outputsize: number }
+> = {
+  "1H": { alpacaTimeframe: "1Min", binanceInterval: "1m", outputsize: 60 },
+  "1D": { alpacaTimeframe: "5Min", binanceInterval: "5m", outputsize: 288 },
+  "1W": { alpacaTimeframe: "1Hour", binanceInterval: "1h", outputsize: 168 },
+  "1M": { alpacaTimeframe: "1Day", binanceInterval: "1d", outputsize: 31 },
+  "1Y": { alpacaTimeframe: "1Week", binanceInterval: "1w", outputsize: 52 },
+};
+
+const cryptoNames: Record<string, string> = {
+  BTC: "Bitcoin",
+  ETH: "Ethereum",
+  SOL: "Solana",
+  BNB: "BNB",
+  XRP: "XRP",
+  ADA: "Cardano",
+  DOGE: "Dogecoin",
+  AVAX: "Avalanche",
+  LINK: "Chainlink",
+  DOT: "Polkadot",
+  LTC: "Litecoin",
+  BCH: "Bitcoin Cash",
+  MATIC: "Polygon",
+  TRX: "TRON",
+  UNI: "Uniswap",
+};
+
+let alpacaAssetCache: { expiresAt: number; assets: MarketSearchResult[] } | null =
+  null;
+let binanceTickerCache: { expiresAt: number; tickers: BinanceTicker[] } | null =
+  null;
+
+export class MarketDataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MarketDataError";
+  }
+}
+
+function alpacaCredentials() {
+  const keyId =
+    process.env.ALPACA_API_KEY_ID?.trim() ||
+    process.env.APCA_API_KEY_ID?.trim();
+  const secretKey =
+    process.env.ALPACA_API_SECRET_KEY?.trim() ||
+    process.env.APCA_API_SECRET_KEY?.trim();
+
+  if (!keyId || !secretKey) return null;
+  return { keyId, secretKey };
+}
+
+function alpacaHeaders() {
+  const credentials = alpacaCredentials();
+  if (!credentials) {
+    throw new MarketDataError(
+      "Stock market data needs ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY.",
+    );
+  }
+
+  return {
+    "APCA-API-KEY-ID": credentials.keyId,
+    "APCA-API-SECRET-KEY": credentials.secretKey,
+  };
 }
 
 function normalizeSymbol(symbol: string) {
   return symbol.trim().toUpperCase();
 }
 
-function classifyAsset(symbol: string, instrumentType?: string): AssetKind {
-  if (symbol.includes("/") || instrumentType?.toLowerCase().includes("crypto")) {
-    return "CRYPTO";
-  }
-
-  return "STOCK";
+function isCryptoSymbol(symbol: string) {
+  const normalized = normalizeSymbol(symbol);
+  return normalized.includes("/") || normalized.endsWith("USDT");
 }
 
-function fallbackAsset(symbol: string): MarketSearchResult {
+function toBinanceSymbol(symbol: string) {
   const normalized = normalizeSymbol(symbol);
-  return (
-    demoAssets.find((asset) => asset.symbol === normalized) ?? {
-      symbol: normalized,
-      name: normalized,
-      type: normalized.includes("/") ? "CRYPTO" : "STOCK",
-      exchange: normalized.includes("/") ? "Crypto" : "Market",
-      currency: "USD",
-    }
-  );
+  if (normalized.includes("/")) {
+    const [base, quote] = normalized.split("/");
+    return `${base}${quote === "USD" ? "USDT" : quote}`;
+  }
+
+  if (normalized.endsWith("USDT")) return normalized;
+  return `${normalized}USDT`;
+}
+
+function fromBinanceSymbol(symbol: string) {
+  const normalized = normalizeSymbol(symbol);
+  if (normalized.endsWith("USDT")) {
+    return `${normalized.slice(0, -4)}/USD`;
+  }
+
+  return normalized;
+}
+
+function cryptoDisplayName(symbol: string) {
+  const base = fromBinanceSymbol(symbol).split("/")[0];
+  return `${cryptoNames[base] ?? base} / US Dollar`;
+}
+
+function toNumber(value: Prisma.Decimal | number | null | undefined) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") return value;
+  return value.toNumber();
+}
+
+function isFresh(date: Date, ttlMs: number) {
+  return Date.now() - date.getTime() < ttlMs;
+}
+
+async function fetchJson<T>(url: URL, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    cache: "no-store",
+  });
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+
+  if (!response.ok) {
+    const message =
+      typeof body === "object" && body && "message" in body
+        ? String((body as { message?: unknown }).message)
+        : response.statusText;
+    throw new MarketDataError(`Market data request failed: ${message}`);
+  }
+
+  if (
+    typeof body === "object" &&
+    body &&
+    "code" in body &&
+    "msg" in body
+  ) {
+    throw new MarketDataError(String((body as { msg?: unknown }).msg));
+  }
+
+  return body as T;
 }
 
 function searchResultKey(asset: MarketSearchResult) {
@@ -95,177 +221,395 @@ function uniqueSearchResults(results: MarketSearchResult[]) {
   });
 }
 
-function hashSymbol(symbol: string) {
-  return [...symbol].reduce((total, char) => total + char.charCodeAt(0), 0);
-}
+async function getAlpacaAssets() {
+  if (alpacaAssetCache && alpacaAssetCache.expiresAt > Date.now()) {
+    return alpacaAssetCache.assets;
+  }
 
-function mockBasePrice(symbol: string) {
-  const hash = hashSymbol(symbol);
-  if (symbol.includes("BTC")) return 62_000 + (hash % 9_000);
-  if (symbol.includes("ETH")) return 3_000 + (hash % 800);
-  if (symbol.includes("SOL")) return 110 + (hash % 90);
-  return 45 + (hash % 420);
-}
+  if (!alpacaCredentials()) return [];
 
-function mockQuote(symbol: string): MarketQuote {
-  const asset = fallbackAsset(symbol);
-  const hash = hashSymbol(asset.symbol);
-  const wave = Math.sin(Date.now() / 900_000 + hash);
-  const price = mockBasePrice(asset.symbol) * (1 + wave * 0.015);
-  const previousClose = price * (1 - wave * 0.01);
-  const change = price - previousClose;
+  const url = new URL(`${ALPACA_TRADING_BASE}/v2/assets`);
+  url.searchParams.set("status", "active");
+  url.searchParams.set("asset_class", "us_equity");
 
-  return {
-    ...asset,
-    price,
-    change,
-    changePercent: previousClose ? change / previousClose : 0,
-    previousClose,
-    timestamp: new Date().toISOString(),
-    provider: "mock",
+  const data = await fetchJson<AlpacaAsset[]>(url, {
+    headers: alpacaHeaders(),
+  });
+
+  const assets = uniqueSearchResults(
+    data
+      .filter((asset) => asset.symbol && asset.name)
+      .filter((asset) => asset.status === "active")
+      .filter((asset) => asset.asset_class === "us_equity")
+      .filter((asset) => asset.tradable !== false)
+      .map((asset) => ({
+        symbol: normalizeSymbol(asset.symbol ?? ""),
+        name: asset.name ?? asset.symbol ?? "Unknown stock",
+        type: "STOCK" as const,
+        exchange: asset.exchange,
+        currency: "USD",
+      })),
+  );
+
+  alpacaAssetCache = {
+    assets,
+    expiresAt: Date.now() + SEARCH_CACHE_MS,
   };
+
+  return assets;
 }
 
-function mockSeries(symbol: string, range: ChartRange): ChartPoint[] {
-  const { outputsize, mockStepMs } = rangeConfig[range];
-  const base = mockBasePrice(symbol);
-  const hash = hashSymbol(symbol);
-  const now = Date.now();
+async function getBinanceTickers() {
+  if (binanceTickerCache && binanceTickerCache.expiresAt > Date.now()) {
+    return binanceTickerCache.tickers;
+  }
 
-  return Array.from({ length: outputsize }, (_, index) => {
-    const reverseIndex = outputsize - index - 1;
-    const time = new Date(now - reverseIndex * mockStepMs);
-    const drift = (index / outputsize - 0.5) * 0.04;
-    const wave = Math.sin(index / 5 + hash) * 0.025;
+  const url = new URL(`${BINANCE_BASE}/api/v3/ticker/price`);
+  const tickers = await fetchJson<BinanceTicker[]>(url);
+  binanceTickerCache = {
+    tickers,
+    expiresAt: Date.now() + SEARCH_CACHE_MS,
+  };
 
-    return {
-      time: time.toISOString(),
-      price: Math.max(0.01, base * (1 + drift + wave)),
-    };
-  });
+  return tickers;
 }
 
-async function getJson<T>(url: URL): Promise<T | null> {
-  const response = await fetch(url, {
-    next: { revalidate: 30 },
-  });
+async function searchStocks(query: string) {
+  const assets = await getAlpacaAssets();
+  const normalizedQuery = query.toUpperCase();
+  const lowerQuery = query.toLowerCase();
 
-  if (!response.ok) {
-    return null;
-  }
+  return assets
+    .filter((asset) => {
+      return (
+        asset.symbol.includes(normalizedQuery) ||
+        asset.name.toLowerCase().includes(lowerQuery)
+      );
+    })
+    .slice(0, 12);
+}
 
-  const data = (await response.json()) as T & { status?: string; message?: string };
-  if (data.status === "error") {
-    return null;
-  }
+async function searchCrypto(query: string) {
+  const normalizedQuery = query.toUpperCase().replace("/", "");
+  const lowerQuery = query.toLowerCase();
+  const tickers = await getBinanceTickers();
 
-  return data;
+  return uniqueSearchResults(
+    tickers
+      .filter((ticker) => ticker.symbol.endsWith("USDT"))
+      .map((ticker) => {
+        const symbol = fromBinanceSymbol(ticker.symbol);
+        return {
+          symbol,
+          name: cryptoDisplayName(ticker.symbol),
+          type: "CRYPTO" as const,
+          exchange: "Binance",
+          currency: "USD",
+        };
+      })
+      .filter((asset) => {
+        const base = asset.symbol.split("/")[0];
+        return (
+          asset.symbol.replace("/", "").includes(normalizedQuery) ||
+          base.includes(normalizedQuery) ||
+          asset.name.toLowerCase().includes(lowerQuery)
+        );
+      }),
+  ).slice(0, 12);
 }
 
 export async function searchMarket(query: string): Promise<MarketSearchResult[]> {
   const normalizedQuery = query.trim();
-  if (normalizedQuery.length < 2) {
-    return demoAssets;
-  }
+  if (normalizedQuery.length < 2) return [];
 
-  const key = apiKey();
-  if (!key) {
-    return searchMarketWithoutApi(normalizedQuery);
-  }
+  const [stockResults, cryptoResults] = await Promise.allSettled([
+    searchStocks(normalizedQuery),
+    searchCrypto(normalizedQuery),
+  ]);
 
-  const url = new URL(`${apiBase}/symbol_search`);
-  url.searchParams.set("symbol", normalizedQuery);
-  url.searchParams.set("apikey", key);
-
-  const data = await getJson<{
-    data?: Array<{
-      symbol?: string;
-      instrument_name?: string;
-      exchange?: string;
-      currency?: string;
-      instrument_type?: string;
-    }>;
-  }>(url);
-
-  const results = uniqueSearchResults(
-    data?.data
-      ?.filter((item) => item.symbol)
-      .map((item) => ({
-        symbol: normalizeSymbol(item.symbol ?? ""),
-        name: item.instrument_name || item.symbol || "Unknown asset",
-        type: classifyAsset(item.symbol ?? "", item.instrument_type),
-        exchange: item.exchange,
-        currency: item.currency || "USD",
-      })) ?? [],
-  ).slice(0, 12);
-
-  return results.length ? results : searchMarketWithoutApi(normalizedQuery);
+  return uniqueSearchResults([
+    ...(stockResults.status === "fulfilled" ? stockResults.value : []),
+    ...(cryptoResults.status === "fulfilled" ? cryptoResults.value : []),
+  ]).slice(0, 12);
 }
 
-function searchMarketWithoutApi(query: string) {
-  return uniqueSearchResults(
-    demoAssets.filter((asset) => {
-      const haystack = `${asset.symbol} ${asset.name}`.toLowerCase();
-      return haystack.includes(query.toLowerCase());
-    }),
+function quoteFromCache(
+  cache: NonNullable<Awaited<ReturnType<typeof prisma.marketQuoteCache.findUnique>>>,
+): MarketQuote {
+  return {
+    symbol: cache.symbol,
+    name: cache.name,
+    type: cache.type,
+    exchange: cache.exchange ?? undefined,
+    currency: cache.currency,
+    provider: cache.provider as MarketDataProvider,
+    price: toNumber(cache.price),
+    change: toNumber(cache.change),
+    changePercent: toNumber(cache.changePercent),
+    previousClose:
+      cache.previousClose === null ? undefined : toNumber(cache.previousClose),
+    timestamp: (cache.sourceTimestamp ?? cache.cachedAt).toISOString(),
+    cached: true,
+  };
+}
+
+async function getCachedQuote(symbol: string, ttlMs?: number) {
+  const cache = await prisma.marketQuoteCache.findUnique({
+    where: { symbol },
+  });
+
+  if (!cache) return null;
+  if (ttlMs !== undefined && !isFresh(cache.cachedAt, ttlMs)) return null;
+  return quoteFromCache(cache);
+}
+
+async function saveQuote(quote: MarketQuote) {
+  await prisma.marketQuoteCache.upsert({
+    where: { symbol: quote.symbol },
+    create: {
+      symbol: quote.symbol,
+      name: quote.name,
+      type: quote.type as AssetType,
+      exchange: quote.exchange,
+      currency: quote.currency,
+      provider: quote.provider,
+      price: quote.price,
+      change: quote.change,
+      changePercent: quote.changePercent,
+      previousClose: quote.previousClose,
+      sourceTimestamp: new Date(quote.timestamp),
+      cachedAt: new Date(),
+    },
+    update: {
+      name: quote.name,
+      type: quote.type as AssetType,
+      exchange: quote.exchange,
+      currency: quote.currency,
+      provider: quote.provider,
+      price: quote.price,
+      change: quote.change,
+      changePercent: quote.changePercent,
+      previousClose: quote.previousClose,
+      sourceTimestamp: new Date(quote.timestamp),
+      cachedAt: new Date(),
+    },
+  });
+}
+
+async function fetchAlpacaQuote(symbol: string): Promise<MarketQuote> {
+  const normalized = normalizeSymbol(symbol);
+  const url = new URL(`${ALPACA_DATA_BASE}/v2/stocks/${normalized}/snapshot`);
+  url.searchParams.set("feed", "iex");
+
+  const data = await fetchJson<{
+    symbol?: string;
+    latestTrade?: { p?: number; t?: string };
+    minuteBar?: { c?: number; t?: string };
+    dailyBar?: { c?: number; t?: string };
+    prevDailyBar?: { c?: number; t?: string };
+  }>(url, {
+    headers: alpacaHeaders(),
+  });
+
+  const price = Number(
+    data.minuteBar?.c ?? data.latestTrade?.p ?? data.dailyBar?.c,
   );
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new MarketDataError(`No stock quote is available for ${normalized}.`);
+  }
+
+  const previousClose = Number(data.prevDailyBar?.c);
+  const change = Number.isFinite(previousClose) ? price - previousClose : 0;
+  const sourceTimestamp =
+    data.minuteBar?.t ?? data.latestTrade?.t ?? data.dailyBar?.t;
+
+  return {
+    symbol: normalized,
+    name: normalized,
+    type: "STOCK",
+    exchange: "Alpaca IEX",
+    currency: "USD",
+    provider: "alpaca",
+    price,
+    previousClose: Number.isFinite(previousClose) ? previousClose : undefined,
+    change,
+    changePercent:
+      Number.isFinite(previousClose) && previousClose > 0
+        ? change / previousClose
+        : 0,
+    timestamp: sourceTimestamp
+      ? new Date(sourceTimestamp).toISOString()
+      : new Date().toISOString(),
+    cached: false,
+  };
+}
+
+async function fetchBinanceQuote(symbol: string): Promise<MarketQuote> {
+  const binanceSymbol = toBinanceSymbol(symbol);
+  const appSymbol = fromBinanceSymbol(binanceSymbol);
+  const url = new URL(`${BINANCE_BASE}/api/v3/ticker/24hr`);
+  url.searchParams.set("symbol", binanceSymbol);
+
+  const data = await fetchJson<{
+    lastPrice?: string;
+    priceChange?: string;
+    priceChangePercent?: string;
+    closeTime?: number;
+  }>(url);
+
+  const price = Number(data.lastPrice);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new MarketDataError(`No crypto quote is available for ${appSymbol}.`);
+  }
+
+  const change = Number(data.priceChange);
+  const changePercent = Number(data.priceChangePercent);
+
+  return {
+    symbol: appSymbol,
+    name: cryptoDisplayName(binanceSymbol),
+    type: "CRYPTO",
+    exchange: "Binance",
+    currency: "USD",
+    provider: "binance",
+    price,
+    change: Number.isFinite(change) ? change : 0,
+    changePercent: Number.isFinite(changePercent) ? changePercent / 100 : 0,
+    previousClose: Number.isFinite(change) ? price - change : undefined,
+    timestamp: data.closeTime
+      ? new Date(data.closeTime).toISOString()
+      : new Date().toISOString(),
+    cached: false,
+  };
 }
 
 export async function getQuote(symbol: string): Promise<MarketQuote> {
   const normalized = normalizeSymbol(symbol);
-  const key = apiKey();
+  const cachedQuote = await getCachedQuote(normalized, QUOTE_CACHE_MS);
+  if (cachedQuote) return cachedQuote;
 
-  if (!key) {
-    return mockQuote(normalized);
+  try {
+    const quote = isCryptoSymbol(normalized)
+      ? await fetchBinanceQuote(normalized)
+      : await fetchAlpacaQuote(normalized);
+    await saveQuote(quote);
+    return quote;
+  } catch (error) {
+    const staleQuote = await getCachedQuote(normalized);
+    if (staleQuote) return staleQuote;
+    throw error;
+  }
+}
+
+function chartPointsFromCache(points: Prisma.JsonValue): ChartPoint[] | null {
+  if (!Array.isArray(points)) return null;
+
+  const chartPoints = points
+    .map((point) => {
+      if (!point || typeof point !== "object") return null;
+      const record = point as { time?: unknown; price?: unknown };
+      const time = typeof record.time === "string" ? record.time : null;
+      const price = Number(record.price);
+      if (!time || !Number.isFinite(price)) return null;
+      return { time, price };
+    })
+    .filter((point): point is ChartPoint => Boolean(point));
+
+  return chartPoints.length ? chartPoints : null;
+}
+
+async function getCachedSeries(symbol: string, range: ChartRange, ttlMs?: number) {
+  const cache = await prisma.marketSeriesCache.findUnique({
+    where: { symbol_range: { symbol, range } },
+  });
+
+  if (!cache) return null;
+  if (ttlMs !== undefined && !isFresh(cache.cachedAt, ttlMs)) return null;
+  return chartPointsFromCache(cache.points);
+}
+
+async function saveSeries(
+  symbol: string,
+  range: ChartRange,
+  provider: MarketDataProvider,
+  points: ChartPoint[],
+) {
+  await prisma.marketSeriesCache.upsert({
+    where: { symbol_range: { symbol, range } },
+    create: {
+      symbol,
+      range,
+      provider,
+      points: points as unknown as Prisma.InputJsonValue,
+      cachedAt: new Date(),
+    },
+    update: {
+      provider,
+      points: points as unknown as Prisma.InputJsonValue,
+      cachedAt: new Date(),
+    },
+  });
+}
+
+async function fetchAlpacaSeries(
+  symbol: string,
+  range: ChartRange,
+): Promise<ChartPoint[]> {
+  const normalized = normalizeSymbol(symbol);
+  const config = rangeConfig[range];
+  const url = new URL(`${ALPACA_DATA_BASE}/v2/stocks/${normalized}/bars`);
+  url.searchParams.set("timeframe", config.alpacaTimeframe);
+  url.searchParams.set("limit", String(config.outputsize));
+  url.searchParams.set("feed", "iex");
+  url.searchParams.set("adjustment", "raw");
+  url.searchParams.set("sort", "asc");
+
+  const data = await fetchJson<{ bars?: AlpacaBar[] | Record<string, AlpacaBar[]> }>(
+    url,
+    { headers: alpacaHeaders() },
+  );
+
+  const bars = Array.isArray(data.bars)
+    ? data.bars
+    : data.bars?.[normalized] ?? [];
+  const points = bars
+    .map((bar) => ({
+      time: bar.t ? new Date(bar.t).toISOString() : "",
+      price: Number(bar.c),
+    }))
+    .filter((point) => point.time && Number.isFinite(point.price));
+
+  if (!points.length) {
+    throw new MarketDataError(`No stock chart data is available for ${normalized}.`);
   }
 
-  const url = new URL(`${apiBase}/quote`);
-  url.searchParams.set("symbol", normalized);
-  url.searchParams.set("apikey", key);
+  return points;
+}
 
-  const data = await getJson<{
-    symbol?: string;
-    name?: string;
-    exchange?: string;
-    currency?: string;
-    close?: string;
-    price?: string;
-    previous_close?: string;
-    change?: string;
-    percent_change?: string;
-  }>(url);
+async function fetchBinanceSeries(
+  symbol: string,
+  range: ChartRange,
+): Promise<ChartPoint[]> {
+  const binanceSymbol = toBinanceSymbol(symbol);
+  const config = rangeConfig[range];
+  const url = new URL(`${BINANCE_BASE}/api/v3/klines`);
+  url.searchParams.set("symbol", binanceSymbol);
+  url.searchParams.set("interval", config.binanceInterval);
+  url.searchParams.set("limit", String(config.outputsize));
 
-  const price = Number(data?.close ?? data?.price);
-  if (!data || !Number.isFinite(price) || price <= 0) {
-    return mockQuote(normalized);
+  const data = await fetchJson<Array<[number, string, string, string, string]>>(url);
+  const points = data
+    .map((item) => ({
+      time: new Date(item[0]).toISOString(),
+      price: Number(item[4]),
+    }))
+    .filter((point) => Number.isFinite(point.price));
+
+  if (!points.length) {
+    throw new MarketDataError(`No crypto chart data is available for ${fromBinanceSymbol(binanceSymbol)}.`);
   }
 
-  const previousClose = Number(data.previous_close);
-  const change = Number(data.change);
-  const changePercent = Number(data.percent_change);
-  const fallback = fallbackAsset(normalized);
-
-  return {
-    symbol: normalizeSymbol(data.symbol ?? normalized),
-    name: data.name || fallback.name,
-    type: classifyAsset(data.symbol ?? normalized),
-    exchange: data.exchange || fallback.exchange,
-    currency: data.currency || fallback.currency,
-    price,
-    previousClose: Number.isFinite(previousClose) ? previousClose : undefined,
-    change: Number.isFinite(change)
-      ? change
-      : Number.isFinite(previousClose)
-        ? price - previousClose
-        : 0,
-    changePercent: Number.isFinite(changePercent)
-      ? changePercent / 100
-      : Number.isFinite(previousClose) && previousClose > 0
-        ? (price - previousClose) / previousClose
-        : 0,
-    timestamp: new Date().toISOString(),
-    provider: "twelve-data",
-  };
+  return points;
 }
 
 export async function getTimeSeries(
@@ -273,31 +617,23 @@ export async function getTimeSeries(
   range: ChartRange,
 ): Promise<ChartPoint[]> {
   const normalized = normalizeSymbol(symbol);
-  const key = apiKey();
-  const config = rangeConfig[range];
+  const cachedSeries = await getCachedSeries(normalized, range, SERIES_CACHE_MS);
+  if (cachedSeries) return cachedSeries;
 
-  if (!key) {
-    return mockSeries(normalized, range);
+  try {
+    const provider: MarketDataProvider = isCryptoSymbol(normalized)
+      ? "binance"
+      : "alpaca";
+    const points =
+      provider === "binance"
+        ? await fetchBinanceSeries(normalized, range)
+        : await fetchAlpacaSeries(normalized, range);
+
+    await saveSeries(normalized, range, provider, points);
+    return points;
+  } catch (error) {
+    const staleSeries = await getCachedSeries(normalized, range);
+    if (staleSeries) return staleSeries;
+    throw error;
   }
-
-  const url = new URL(`${apiBase}/time_series`);
-  url.searchParams.set("symbol", normalized);
-  url.searchParams.set("interval", config.interval);
-  url.searchParams.set("outputsize", String(config.outputsize));
-  url.searchParams.set("apikey", key);
-
-  const data = await getJson<{
-    values?: Array<{ datetime?: string; close?: string }>;
-  }>(url);
-
-  const values =
-    data?.values
-      ?.map((item) => ({
-        time: item.datetime ?? new Date().toISOString(),
-        price: Number(item.close),
-      }))
-      .filter((point) => Number.isFinite(point.price))
-      .reverse() ?? [];
-
-  return values.length ? values : mockSeries(normalized, range);
 }

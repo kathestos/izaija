@@ -18,13 +18,13 @@ enum TransactionType {
 }
 
 model Profile {
-  id           String    @id @default(cuid())
-  clerkUserId  String    @unique
-  initialCash  Decimal?
-  cashBalance  Decimal   @default(0)
-  isOnboarded Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id          String   @id @default(cuid())
+  clerkUserId String   @unique
+  initialCash Decimal?
+  cashBalance Decimal  @default(0)
+  isOnboarded Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   positions    Position[]
   transactions Transaction[]
@@ -85,4 +85,33 @@ model WatchlistItem {
   asset   Asset   @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@unique([profileId, assetId])
+}
+
+model MarketQuoteCache {
+  id              String    @id @default(cuid())
+  symbol          String    @unique
+  name            String
+  type            AssetType
+  exchange        String?
+  currency        String    @default("USD")
+  provider        String
+  price           Decimal
+  change          Decimal   @default(0)
+  changePercent   Decimal   @default(0)
+  previousClose   Decimal?
+  sourceTimestamp DateTime?
+  cachedAt        DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model MarketSeriesCache {
+  id        String   @id @default(cuid())
+  symbol    String
+  range     String
+  provider  String
+  points    Json
+  cachedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([symbol, range])
 }

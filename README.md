@@ -11,7 +11,9 @@ Izaija is a mock investing web app. Users sign in, choose a virtual starting bal
 - Clerk authentication
 - tRPC API endpoints
 - Prisma with Prisma Postgres
-- Twelve Data market data integration with a local demo fallback
+- Alpaca stock market data
+- Binance public crypto market data
+- Prisma-backed quote and chart caching
 
 ## Setup
 
@@ -36,11 +38,20 @@ Izaija is a mock investing web app. Users sign in, choose a virtual starting bal
    - Put the publishable key into `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`.
    - Put the secret key into `CLERK_SECRET_KEY`.
 
-4. Optional market data:
+4. Market data:
 
-   - Create a free Twelve Data account at `https://twelvedata.com/`.
-   - Copy your API key into `TWELVE_DATA_API_KEY`.
-   - If no key is set, the app still runs with deterministic demo prices for development.
+   - Create an Alpaca account at `https://alpaca.markets/`.
+   - Open the Alpaca dashboard.
+   - Choose paper trading.
+   - Open API keys and generate or regenerate a key pair.
+   - Put the key id into `ALPACA_API_KEY_ID`.
+   - Put the secret key into `ALPACA_API_SECRET_KEY`.
+   - Crypto prices use Binance public market endpoints and do not require a key.
+   - Quotes are cached in Prisma for 1 minute. Chart series are cached in Prisma for 5 minutes.
+
+   Without Alpaca keys, stock search/quotes will be unavailable. Crypto search/quotes still work through Binance.
+
+   Optional Binance API keys are not needed for this app because public market data endpoints are enough. If you still want one, create a Binance account, open API Management, and create an API key with trading disabled. Do not add withdrawal permissions.
 
 5. Apply database migrations:
 

@@ -79,6 +79,20 @@ function marketListKey(asset: MarketListAsset, index: number) {
     .join("|");
 }
 
+function providerLabel(provider?: "alpaca" | "binance", cached?: boolean) {
+  if (!provider) return "market data";
+  const label = provider === "alpaca" ? "Alpaca" : "Binance";
+  return cached ? `${label} cached data` : label;
+}
+
+function nullableCurrency(value: number | null | undefined) {
+  return value === null || value === undefined ? "Unavailable" : formatCurrency(value);
+}
+
+function nullablePercent(value: number | null | undefined) {
+  return value === null || value === undefined ? "Unavailable" : formatPercent(value);
+}
+
 export function DashboardClient({ userName }: { userName: string }) {
   const utils = trpc.useUtils();
   const [query, setQuery] = useState("");
@@ -89,19 +103,28 @@ export function DashboardClient({ userName }: { userName: string }) {
   const [message, setMessage] = useState<string | null>(null);
 
   const summary = trpc.portfolio.summary.useQuery(undefined, {
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
   });
   const search = trpc.market.search.useQuery(
     { query },
-    { enabled: query.trim().length >= 2 },
+    { enabled: query.trim().length >= 2, refetchOnWindowFocus: false },
   );
   const quote = trpc.market.quote.useQuery(
     { symbol: selectedAsset.symbol },
-    { enabled: Boolean(selectedAsset.symbol), refetchInterval: 30_000 },
+    {
+      enabled: Boolean(selectedAsset.symbol),
+      refetchInterval: 60_000,
+      refetchOnWindowFocus: false,
+    },
   );
   const series = trpc.market.timeSeries.useQuery(
     { symbol: selectedAsset.symbol, range },
-    { enabled: Boolean(selectedAsset.symbol), refetchInterval: 60_000 },
+    {
+      enabled: Boolean(selectedAsset.symbol),
+      refetchInterval: 5 * 60_000,
+      refetchOnWindowFocus: false,
+    },
   );
 
   const addToWatchlist = trpc.portfolio.addToWatchlist.useMutation({
@@ -218,7 +241,7 @@ export function DashboardClient({ userName }: { userName: string }) {
               <div>
                 <CardTitle>{selectedAsset.symbol} price chart</CardTitle>
                 <CardDescription>
-                  {selectedAsset.name} {quote.data?.provider === "mock" ? "using demo prices" : "using Twelve Data"}
+                  {selectedAsset.name} using {providerLabel(quote.data?.provider, quote.data?.cached)}
                 </CardDescription>
               </div>
               <Tabs value={range} onValueChange={(value) => setRange(value as ChartRange)}>
@@ -233,7 +256,11 @@ export function DashboardClient({ userName }: { userName: string }) {
             </CardHeader>
             <CardContent>
               <div className="h-[320px] w-full">
-                {series.isLoading ? (
+                {series.error ? (
+                  <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
+                    {series.error.message}
+                  </div>
+                ) : series.isLoading ? (
                   <div className="flex h-full items-center justify-center text-muted-foreground">
                     <Loader2 className="mr-2 size-4 animate-spin" aria-hidden="true" />
                     Loading chart
@@ -276,7 +303,7 @@ export function DashboardClient({ userName }: { userName: string }) {
           <Card>
             <CardHeader>
               <CardTitle>Wallet</CardTitle>
-              <CardDescription>Open mock positions with live or demo marks.</CardDescription>
+              <CardDescription>Open mock positions with cached market marks.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
@@ -314,17 +341,17 @@ export function DashboardClient({ userName }: { userName: string }) {
                           </td>
                           <td className="py-3 pr-3">{formatQuantity(position.quantity)}</td>
                           <td className="py-3 pr-3">{formatCurrency(position.averageCost)}</td>
-                          <td className="py-3 pr-3">{formatCurrency(position.price)}</td>
-                          <td className="py-3 pr-3">{formatCurrency(position.marketValue)}</td>
+                          <td className="py-3 pr-3">{nullableCurrency(position.price)}</td>
+                          <td className="py-3 pr-3">{nullableCurrency(position.marketValue)}</td>
                           <td
                             className={cn(
                               "py-3 pr-3 font-medium",
-                              position.gainLoss >= 0 ? "text-profit" : "text-loss",
+                              (position.gainLoss ?? 0) >= 0 ? "text-profit" : "text-loss",
                             )}
                           >
-                            {formatCurrency(position.gainLoss)}
+                            {nullableCurrency(position.gainLoss)}
                             <span className="ml-1 text-xs">
-                              ({formatPercent(position.gainLossPercent)})
+                              ({nullablePercent(position.gainLossPercent)})
                             </span>
                           </td>
                         </tr>
@@ -426,7 +453,7 @@ export function DashboardClient({ userName }: { userName: string }) {
                         selectedAsset.symbol === asset.symbol &&
                           selectedAsset.type === asset.type &&
                           selectedAsset.exchange ===
-                            ("exchange" in asset ? asset.exchange : undefined) &&
+                            ("exchange" in asset ? asset.exchange ?? undefined : undefined) &&
                           "border-primary",
                       )}
                       onClick={() =>
@@ -434,8 +461,8 @@ export function DashboardClient({ userName }: { userName: string }) {
                           symbol: asset.symbol,
                           name: asset.name,
                           type: asset.type,
-                          currency: "currency" in asset ? asset.currency : "USD",
-                          exchange: "exchange" in asset ? asset.exchange : undefined,
+                          currency: "currency" in asset ? asset.currency ?? "USD" : "USD",
+                          exchange: "exchange" in asset ? asset.exchange ?? undefined : undefined,
                         })
                       }
                       type="button"
@@ -472,6 +499,11 @@ export function DashboardClient({ userName }: { userName: string }) {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {quote.error ? (
+                <p className="rounded-md border border-destructive/30 p-3 text-sm text-destructive">
+                  {quote.error.message}
+                </p>
+              ) : null}
               <div className="rounded-md bg-muted p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div>

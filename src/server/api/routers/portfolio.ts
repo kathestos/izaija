@@ -2,7 +2,7 @@ import { AssetType, Prisma, TransactionType } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
-import { getQuote } from "@/server/services/market-data";
+import { getQuote, type MarketQuote } from "@/server/services/market-data";
 
 const assetInput = z.object({
   symbol: z.string().trim().min(1).max(24),
@@ -20,6 +20,14 @@ function toNumber(value: Prisma.Decimal | number | null | undefined) {
   if (value === null || value === undefined) return 0;
   if (typeof value === "number") return value;
   return value.toNumber();
+}
+
+async function getQuoteOrNull(symbol: string): Promise<MarketQuote | null> {
+  try {
+    return await getQuote(symbol);
+  } catch {
+    return null;
+  }
 }
 
 async function getProfile(ctx: {
@@ -64,11 +72,12 @@ export const portfolioRouter = createTRPCRouter({
 
     const positionsWithQuotes = await Promise.all(
       positions.map(async (position) => {
-        const quote = await getQuote(position.asset.symbol);
+        const quote = await getQuoteOrNull(position.asset.symbol);
         const quantity = toNumber(position.quantity);
         const averageCost = toNumber(position.averageCost);
-        const marketValue = quantity * quote.price;
+        const marketValue = quote ? quantity * quote.price : null;
         const costBasis = quantity * averageCost;
+        const gainLoss = marketValue === null ? null : marketValue - costBasis;
 
         return {
           id: position.id,
@@ -77,30 +86,32 @@ export const portfolioRouter = createTRPCRouter({
           type: position.asset.type,
           quantity,
           averageCost,
-          price: quote.price,
+          price: quote?.price ?? null,
           marketValue,
-          gainLoss: marketValue - costBasis,
-          gainLossPercent: costBasis > 0 ? (marketValue - costBasis) / costBasis : 0,
+          gainLoss,
+          gainLossPercent:
+            gainLoss === null || costBasis <= 0 ? null : gainLoss / costBasis,
+          quoteAvailable: Boolean(quote),
         };
       }),
     );
 
     const watchlistWithQuotes = await Promise.all(
       watchlist.map(async (item) => {
-        const quote = await getQuote(item.asset.symbol);
+        const quote = await getQuoteOrNull(item.asset.symbol);
         return {
           id: item.id,
           symbol: item.asset.symbol,
           name: item.asset.name,
           type: item.asset.type,
-          price: quote.price,
-          changePercent: quote.changePercent,
+          price: quote?.price ?? null,
+          changePercent: quote?.changePercent ?? null,
         };
       }),
     );
 
     const investedValue = positionsWithQuotes.reduce(
-      (total, position) => total + position.marketValue,
+      (total, position) => total + (position.marketValue ?? 0),
       0,
     );
     const cashBalance = toNumber(profile.cashBalance);
