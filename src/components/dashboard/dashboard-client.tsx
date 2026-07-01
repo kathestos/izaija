@@ -105,10 +105,15 @@ export function DashboardClient({ userName }: { userName: string }) {
   const summary = trpc.portfolio.summary.useQuery(undefined, {
     refetchInterval: 60_000,
     refetchOnWindowFocus: false,
+    retry: false,
   });
   const search = trpc.market.search.useQuery(
     { query },
-    { enabled: query.trim().length >= 2, refetchOnWindowFocus: false },
+    {
+      enabled: query.trim().length >= 2,
+      refetchOnWindowFocus: false,
+      retry: false,
+    },
   );
   const quote = trpc.market.quote.useQuery(
     { symbol: selectedAsset.symbol },
@@ -116,6 +121,7 @@ export function DashboardClient({ userName }: { userName: string }) {
       enabled: Boolean(selectedAsset.symbol),
       refetchInterval: 60_000,
       refetchOnWindowFocus: false,
+      retry: false,
     },
   );
   const series = trpc.market.timeSeries.useQuery(
@@ -124,6 +130,7 @@ export function DashboardClient({ userName }: { userName: string }) {
       enabled: Boolean(selectedAsset.symbol),
       refetchInterval: 5 * 60_000,
       refetchOnWindowFocus: false,
+      retry: false,
     },
   );
 

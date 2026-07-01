@@ -58,13 +58,43 @@ const BINANCE_BASE = "https://api.binance.com";
 
 const rangeConfig: Record<
   ChartRange,
-  { alpacaTimeframe: string; binanceInterval: string; outputsize: number }
+  {
+    alpacaTimeframe: string;
+    alpacaLookbackDays: number;
+    binanceInterval: string;
+    outputsize: number;
+  }
 > = {
-  "1H": { alpacaTimeframe: "1Min", binanceInterval: "1m", outputsize: 60 },
-  "1D": { alpacaTimeframe: "5Min", binanceInterval: "5m", outputsize: 288 },
-  "1W": { alpacaTimeframe: "1Hour", binanceInterval: "1h", outputsize: 168 },
-  "1M": { alpacaTimeframe: "1Day", binanceInterval: "1d", outputsize: 31 },
-  "1Y": { alpacaTimeframe: "1Week", binanceInterval: "1w", outputsize: 52 },
+  "1H": {
+    alpacaTimeframe: "1Min",
+    alpacaLookbackDays: 10,
+    binanceInterval: "1m",
+    outputsize: 60,
+  },
+  "1D": {
+    alpacaTimeframe: "5Min",
+    alpacaLookbackDays: 10,
+    binanceInterval: "5m",
+    outputsize: 100,
+  },
+  "1W": {
+    alpacaTimeframe: "1Hour",
+    alpacaLookbackDays: 14,
+    binanceInterval: "1h",
+    outputsize: 80,
+  },
+  "1M": {
+    alpacaTimeframe: "1Day",
+    alpacaLookbackDays: 60,
+    binanceInterval: "1d",
+    outputsize: 31,
+  },
+  "1Y": {
+    alpacaTimeframe: "1Week",
+    alpacaLookbackDays: 420,
+    binanceInterval: "1w",
+    outputsize: 52,
+  },
 };
 
 const cryptoNames: Record<string, string> = {
@@ -566,11 +596,18 @@ async function fetchAlpacaSeries(
   const normalized = normalizeSymbol(symbol);
   const config = rangeConfig[range];
   const url = new URL(`${ALPACA_DATA_BASE}/v2/stocks/${normalized}/bars`);
+  const end = new Date();
+  const start = new Date(
+    end.getTime() - config.alpacaLookbackDays * 24 * 60 * 60 * 1000,
+  );
+
   url.searchParams.set("timeframe", config.alpacaTimeframe);
+  url.searchParams.set("start", start.toISOString());
+  url.searchParams.set("end", end.toISOString());
   url.searchParams.set("limit", String(config.outputsize));
   url.searchParams.set("feed", "iex");
   url.searchParams.set("adjustment", "raw");
-  url.searchParams.set("sort", "asc");
+  url.searchParams.set("sort", "desc");
 
   const data = await fetchJson<{ bars?: AlpacaBar[] | Record<string, AlpacaBar[]> }>(
     url,
@@ -585,7 +622,8 @@ async function fetchAlpacaSeries(
       time: bar.t ? new Date(bar.t).toISOString() : "",
       price: Number(bar.c),
     }))
-    .filter((point) => point.time && Number.isFinite(point.price));
+    .filter((point) => point.time && Number.isFinite(point.price))
+    .reverse();
 
   if (!points.length) {
     throw new MarketDataError(`No stock chart data is available for ${normalized}.`);
