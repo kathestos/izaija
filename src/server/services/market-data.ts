@@ -52,7 +52,7 @@ const QUOTE_CACHE_MS = 60_000;
 const SERIES_CACHE_MS = 5 * 60_000;
 const SEARCH_CACHE_MS = 15 * 60_000;
 
-const ALPACA_TRADING_BASE = "https://paper-api.alpaca.markets";
+const DEFAULT_ALPACA_ENDPOINT = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA_BASE = "https://data.alpaca.markets";
 const BINANCE_BASE = "https://api.binance.com";
 
@@ -121,6 +121,14 @@ function alpacaHeaders() {
     "APCA-API-KEY-ID": credentials.keyId,
     "APCA-API-SECRET-KEY": credentials.secretKey,
   };
+}
+
+function alpacaTradingUrl(path: string) {
+  const base = (
+    process.env.ALPACA_ENDPOINT?.trim() || DEFAULT_ALPACA_ENDPOINT
+  ).replace(/\/+$/, "");
+
+  return new URL(`${base}${path}`);
 }
 
 function normalizeSymbol(symbol: string) {
@@ -228,7 +236,7 @@ async function getAlpacaAssets() {
 
   if (!alpacaCredentials()) return [];
 
-  const url = new URL(`${ALPACA_TRADING_BASE}/v2/assets`);
+  const url = alpacaTradingUrl("/assets");
   url.searchParams.set("status", "active");
   url.searchParams.set("asset_class", "us_equity");
 

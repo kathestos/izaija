@@ -44,6 +44,7 @@ Izaija is a mock investing web app. Users sign in, choose a virtual starting bal
    - Open the Alpaca dashboard.
    - Choose paper trading.
    - Open API keys and generate or regenerate a key pair.
+   - Keep `ALPACA_ENDPOINT` as `https://paper-api.alpaca.markets/v2`.
    - Put the key id into `ALPACA_API_KEY_ID`.
    - Put the secret key into `ALPACA_API_SECRET_KEY`.
    - Crypto prices use Binance public market endpoints and do not require a key.
